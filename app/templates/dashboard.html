@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <title>Yönetim Paneli</title>
+</head>
+<body>
+    <h1>Yönetim Paneli</h1>
+    <h2>Müşteri Adayları (Leads)</h2>
+    <ul>
+        {% for lead in leads %}
+            <li>{{ lead.name }} - {{ lead.email }} ({{ lead.status }})</li>
+        {% else %}
+            <li>Henüz kayıtlı lead yok.</li>
+        {% endfor %}
+    </ul>
+</body>
+</html>
