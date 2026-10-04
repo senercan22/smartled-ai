@@ -1,18 +1,26 @@
 import jwt
 import datetime
 from functools import wraps
-from flask import request, jsonify
-from flask import current_app as app # veya direkt app nesnen
+from flask import Blueprint, render_template, request, jsonify
 
-# Kendi belirleyeceğin çok gizli ve zor bir şifre olsun
-SECRET_KEY = "adsc_creative_cok_gizli_anahtar_2026" 
+from app.database import lead_ekle, tum_leadler
+from app.services.ai_service import ai_service, AIServiceError
 
-# 1. TOKEN KONTROL GÜVENLİK KALKANI
+main_bp = Blueprint("main", __name__)
+api_bp = Blueprint("api", __name__)
+
+# Güvenlik şifremiz
+SECRET_KEY = "adsc_creative_cok_gizli_anahtar_2026"
+
+# --- TOKEN KONTROL GÜVENLİK KALKANI ---
 def token_required(f):
     @wraps(f)
     def decorated(*args, **kwargs):
+        # Wix'in gönderdiği öncü güvenlik isteklerine (OPTIONS) izin ver
+        if request.method == 'OPTIONS':
+            return '', 200
+            
         token = None
-        # Gelen istekte Authorization başlığı var mı kontrol et
         if 'Authorization' in request.headers:
             token = request.headers['Authorization'].split(" ")[1] 
         
@@ -20,60 +28,98 @@ def token_required(f):
             return jsonify({'hata': 'Bu veriyi görmek için giriş yapmalısınız!'}), 401
         
         try:
-            # Token'ın geçerli olup olmadığını bizim gizli şifremizle çözerek anlar
-            data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+            jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
         except:
             return jsonify({'hata': 'Geçersiz veya süresi dolmuş oturum!'}), 401
             
         return f(*args, **kwargs)
     return decorated
 
-# 2. GİRİŞ YAPMA VE TOKEN ÜRETME ROTASI
-@app.route('/api/login', methods=['POST', 'OPTIONS'])
+# --- SAĞLIK KONTROLÜ (HEALTH) ---
+@main_bp.route("/health")
+def health():
+    return jsonify({"durum": "aktif", "mesaj": "SmartLead AI servisi sorunsuz çalışıyor."}), 200
+
+# --- SAYFA ROTALARI ---
+@main_bp.route("/")
+def index():
+    return render_template("index.html")
+
+@main_bp.route("/dashboard")
+def dashboard():
+    leads = tum_leadler()
+    return render_template("dashboard.html", leads=leads)
+
+# --- API ROTALARI ---
+
+# 1. WIX ADMİN GİRİŞ ROTASI
+@api_bp.route("/login", methods=["POST", "OPTIONS"])
 def login():
     if request.method == 'OPTIONS':
         return '', 200
         
-    veri = request.get_json()
-    kullanici = veri.get('kullanici')
-    sifre = veri.get('sifre')
+    data = request.get_json() or {}
+    kullanici = data.get('kullanici')
+    sifre = data.get('sifre')
 
-    # BURAYA KENDİ ADMİN BİLGİLERİNİ YAZ
     if kullanici == "admin" and sifre == "adsc2026":
-        # Şifre doğruysa 24 saat geçerli bir yaka kartı (token) üret
         token = jwt.encode({
             'user': kullanici,
             'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
         }, SECRET_KEY, algorithm="HS256")
-        
         return jsonify({'basari': True, 'token': token})
     else:
         return jsonify({'basari': False, 'hata': 'Yanlış kullanıcı adı veya şifre!'}), 401
 
-# 3. VERİ ÇEKME ROTASINI (KORUMA ALTINA ALINMIŞ HALİ)
-@app.route('/api/leads', methods=['GET', 'POST', 'OPTIONS'])
-def leads():
+
+@api_bp.route("/sohbet", methods=["POST", "OPTIONS"])
+def sohbet():
     if request.method == 'OPTIONS':
         return '', 200
-
-    # Ziyaretçi formu doldurduğunda POST ile buraya gelir (Token gerekmez)
-    if request.method == 'POST':
-        # ... Veritabanına kaydetme kodların (mevcut kodun aynı kalacak) ...
-        return jsonify({'basari': True, 'mesaj': 'Kayıt başarılı'})
-
-    # Admin verileri görmek için GET ile buraya gelir (Token ZORUNLUDUR)
-    if request.method == 'GET':
-        # Burada token'ı manuel kontrol ediyoruz çünkü POST ve GET aynı rotada
-        token = None
-        if 'Authorization' in request.headers:
-            token = request.headers['Authorization'].split(" ")[1] 
         
-        if not token:
-            return jsonify({'hata': 'Giriş yapmalısınız!'}), 401
-        try:
-            jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
-        except:
-            return jsonify({'hata': 'Oturum geçersiz!'}), 401
+    data = request.get_json() or {}
+    mesaj = data.get("mesaj", "").strip()
+    gecmis = data.get("gecmis", [])
 
-        # ... Token doğruysa veritabanından müşterileri çekip döndürme kodun ...
-        # return jsonify({'leads': cekilen_veriler})
+    if not mesaj:
+        return jsonify({"basari": False, "hata": "Mesaj alanı zorunludur."}), 400
+
+    try:
+        cevap = ai_service.yanit_uret(mesaj, gecmis)
+        return jsonify({"basari": True, "cevap": cevap}), 200
+    except AIServiceError as e:
+        return jsonify({"basari": False, "hata": str(e)}), 503
+
+# 2. YENİ MÜŞTERİ KAYDETME (Wix Formundan Gelen)
+@api_bp.route("/leads", methods=["POST", "OPTIONS"])
+def yeni_lead():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    data = request.get_json() or {}
+    isim = data.get("isim", "").strip()
+    email = data.get("email", "").strip() # Wix ile uyumlu olması için telefon yerine email yapıldı
+    mesaj = data.get("mesaj", "").strip()
+
+    if not isim or not email:
+        return jsonify({"basari": False, "hata": "İsim ve email alanları zorunludur."}), 400
+
+    try:
+        # Veritabanı fonksiyonuna telefon argümanı yerine email argümanı gönderiliyor
+        lead_id = lead_ekle(isim, email, mesaj)
+        return jsonify({"basari": True, "id": lead_id, "mesaj": "Lead başarıyla kaydedildi."}), 201
+    except Exception as e:
+        return jsonify({"basari": False, "hata": "Veritabanı kaydı sırasında hata oluştu."}), 500
+
+# 3. MÜŞTERİLERİ LİSTELEME (Güvenlik Kalkanı Eklendi)
+@api_bp.route("/leads", methods=["GET", "OPTIONS"])
+@token_required # Token olmadan bu rotaya girilemez
+def lead_listesi():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    try:
+        leads = tum_leadler()
+        return jsonify({"basari": True, "leads": leads}), 200
+    except Exception as e:
+        return jsonify({"basari": False, "hata": "Kayıtlar çekilemedi."}), 500
