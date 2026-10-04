@@ -1,64 +1,79 @@
-from flask import Blueprint, render_template, request, jsonify
-from app.database import lead_ekle, tum_leadler
-from app.services.ai_service import ai_service, AIServiceError
+import jwt
+import datetime
+from functools import wraps
+from flask import request, jsonify
+from flask import current_app as app # veya direkt app nesnen
 
-main_bp = Blueprint("main", __name__)
-api_bp = Blueprint("api", __name__)
+# Kendi belirleyeceğin çok gizli ve zor bir şifre olsun
+SECRET_KEY = "adsc_creative_cok_gizli_anahtar_2026" 
 
-# --- SAĞLIK KONTROLÜ (HEALTH) ---
+# 1. TOKEN KONTROL GÜVENLİK KALKANI
+def token_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        token = None
+        # Gelen istekte Authorization başlığı var mı kontrol et
+        if 'Authorization' in request.headers:
+            token = request.headers['Authorization'].split(" ")[1] 
+        
+        if not token:
+            return jsonify({'hata': 'Bu veriyi görmek için giriş yapmalısınız!'}), 401
+        
+        try:
+            # Token'ın geçerli olup olmadığını bizim gizli şifremizle çözerek anlar
+            data = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        except:
+            return jsonify({'hata': 'Geçersiz veya süresi dolmuş oturum!'}), 401
+            
+        return f(*args, **kwargs)
+    return decorated
 
-@main_bp.route("/health")
-def health():
-    return jsonify({"durum": "aktif", "mesaj": "SmartLead AI servisi sorunsuz çalışıyor."}), 200
+# 2. GİRİŞ YAPMA VE TOKEN ÜRETME ROTASI
+@app.route('/api/login', methods=['POST', 'OPTIONS'])
+def login():
+    if request.method == 'OPTIONS':
+        return '', 200
+        
+    veri = request.get_json()
+    kullanici = veri.get('kullanici')
+    sifre = veri.get('sifre')
 
-# --- SAYFA ROTALARI ---
+    # BURAYA KENDİ ADMİN BİLGİLERİNİ YAZ
+    if kullanici == "admin" and sifre == "adsc2026":
+        # Şifre doğruysa 24 saat geçerli bir yaka kartı (token) üret
+        token = jwt.encode({
+            'user': kullanici,
+            'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24)
+        }, SECRET_KEY, algorithm="HS256")
+        
+        return jsonify({'basari': True, 'token': token})
+    else:
+        return jsonify({'basari': False, 'hata': 'Yanlış kullanıcı adı veya şifre!'}), 401
 
-@main_bp.route("/")
-def index():
-    return render_template("index.html")
+# 3. VERİ ÇEKME ROTASINI (KORUMA ALTINA ALINMIŞ HALİ)
+@app.route('/api/leads', methods=['GET', 'POST', 'OPTIONS'])
+def leads():
+    if request.method == 'OPTIONS':
+        return '', 200
 
-@main_bp.route("/dashboard")
-def dashboard():
-    leads = tum_leadler()
-    return render_template("dashboard.html", leads=leads)
+    # Ziyaretçi formu doldurduğunda POST ile buraya gelir (Token gerekmez)
+    if request.method == 'POST':
+        # ... Veritabanına kaydetme kodların (mevcut kodun aynı kalacak) ...
+        return jsonify({'basari': True, 'mesaj': 'Kayıt başarılı'})
 
-# --- API ROTALARI ---
+    # Admin verileri görmek için GET ile buraya gelir (Token ZORUNLUDUR)
+    if request.method == 'GET':
+        # Burada token'ı manuel kontrol ediyoruz çünkü POST ve GET aynı rotada
+        token = None
+        if 'Authorization' in request.headers:
+            token = request.headers['Authorization'].split(" ")[1] 
+        
+        if not token:
+            return jsonify({'hata': 'Giriş yapmalısınız!'}), 401
+        try:
+            jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        except:
+            return jsonify({'hata': 'Oturum geçersiz!'}), 401
 
-@api_bp.route("/sohbet", methods=["POST"])
-def sohbet():
-    data = request.get_json() or {}
-    mesaj = data.get("mesaj", "").strip()
-    gecmis = data.get("gecmis", [])
-
-    if not mesaj:
-        return jsonify({"basari": False, "hata": "Mesaj alanı zorunludur."}), 400
-
-    try:
-        cevap = ai_service.yanit_uret(mesaj, gecmis)
-        return jsonify({"basari": True, "cevap": cevap}), 200
-    except AIServiceError as e:
-        return jsonify({"basari": False, "hata": str(e)}), 503
-
-@api_bp.route("/leads", methods=["POST"])
-def yeni_lead():
-    data = request.get_json() or {}
-    isim = data.get("isim", "").strip()
-    telefon = data.get("telefon", "").strip()
-    mesaj = data.get("mesaj", "").strip()
-
-    if not isim or not telefon:
-        return jsonify({"basari": False, "hata": "İsim ve telefon alanları zorunludur."}), 400
-
-    try:
-        lead_id = lead_ekle(isim, telefon, mesaj)
-        return jsonify({"basari": True, "id": lead_id, "mesaj": "Lead başarıyla kaydedildi."}), 201
-    except Exception as e:
-        return jsonify({"basari": False, "hata": "Veritabanı kaydı sırasında hata oluştu."}), 500
-
-@api_bp.route("/leads", methods=["GET"])
-def lead_listesi():
-    try:
-        leads = tum_leadler()
-        return jsonify({"basari": True, "leads": leads}), 200
-    except Exception as e:
-        return jsonify({"basari": False, "hata": "Kayıtlar çekilemedi."}), 500
+        # ... Token doğruysa veritabanından müşterileri çekip döndürme kodun ...
+        # return jsonify({'leads': cekilen_veriler})
