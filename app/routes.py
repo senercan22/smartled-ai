@@ -98,14 +98,13 @@ def yeni_lead():
         
     data = request.get_json() or {}
     isim = data.get("isim", "").strip()
-    email = data.get("email", "").strip() # Wix ile uyumlu olması için telefon yerine email yapıldı
+    email = data.get("email", "").strip() 
     mesaj = data.get("mesaj", "").strip()
 
     if not isim or not email:
         return jsonify({"basari": False, "hata": "İsim ve email alanları zorunludur."}), 400
 
     try:
-        # Veritabanı fonksiyonuna telefon argümanı yerine email argümanı gönderiliyor
         lead_id = lead_ekle(isim, email, mesaj)
         return jsonify({"basari": True, "id": lead_id, "mesaj": "Lead başarıyla kaydedildi."}), 201
     except Exception as e:
@@ -113,7 +112,7 @@ def yeni_lead():
 
 # 3. MÜŞTERİLERİ LİSTELEME (Güvenlik Kalkanı Eklendi)
 @api_bp.route("/leads", methods=["GET", "OPTIONS"])
-@token_required # Token olmadan bu rotaya girilemez
+@token_required 
 def lead_listesi():
     if request.method == 'OPTIONS':
         return '', 200
